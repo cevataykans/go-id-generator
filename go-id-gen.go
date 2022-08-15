@@ -23,7 +23,7 @@ const (
 type FlakeNode struct {
 	sync.Mutex
 
-	custom_epoch int64
+	custom_epoch time.Time
 	nodeId       int64
 
 	counter   int64
@@ -43,11 +43,11 @@ func NewFlakeNode(epoch time.Time, node int64) (*FlakeNode, error) {
 
 	return &FlakeNode{
 
-		custom_epoch: epoch.UnixMilli(),
+		custom_epoch: epoch,
 		nodeId:       node,
 
 		counter:   0,
-		timestamp: time.Now().UnixMilli(),
+		timestamp: epoch.UnixMilli(),
 	}, nil
 }
 
@@ -55,6 +55,7 @@ func (n *FlakeNode) GenerateToChannel(c chan<- SnowFlakeID) {
 
 	msTicker := time.NewTicker(time.Millisecond)
 	now := time.Now().UnixMilli()
+	epoch := n.custom_epoch.UnixMilli()
 	for {
 
 		select {
@@ -63,22 +64,25 @@ func (n *FlakeNode) GenerateToChannel(c chan<- SnowFlakeID) {
 			now++
 			n.counter = 0
 
-		case c <- SnowFlakeID(((now - n.custom_epoch) << TimeShift) |
+		case c <- SnowFlakeID(((now - epoch) << TimeShift) |
 			(n.nodeId << NodeShift) |
 			n.counter):
 
 			n.counter = (n.counter + 1) & MaxCounter
 			if n.counter == 0 {
-				time.Sleep(time.Millisecond)
+				<-msTicker.C
+				now++
+				n.counter = 0
 			}
 		}
 	}
 }
 
-func (n *FlakeNode) GenerateToChannelByReq(c <-chan *FlakeRequest) {
+func (n *FlakeNode) GenerateToChannelByReqAutoTime(c <-chan *FlakeRequest) {
 
 	msTicker := time.NewTicker(time.Millisecond)
 	now := time.Now().UnixMilli()
+	epoch := n.custom_epoch.UnixMilli()
 	for {
 
 		select {
@@ -90,39 +94,42 @@ func (n *FlakeNode) GenerateToChannelByReq(c <-chan *FlakeRequest) {
 		case req := <-c:
 
 			req.id = SnowFlakeID(
-				((now - n.custom_epoch) << TimeShift) |
+				((now - epoch) << TimeShift) |
 					(n.nodeId << NodeShift) |
 					n.counter)
-			close(req.done)
 
 			n.counter = (n.counter + 1) & MaxCounter
 			if n.counter == 0 {
-				time.Sleep(time.Millisecond)
+				<-msTicker.C
+				now++
+				n.counter = 0
 			}
+			close(req.done)
 		}
 	}
 }
 
-func (n *FlakeNode) GeneratePerRequest(c <-chan *FlakeRequest) {
+func (n *FlakeNode) GenerateToChannelByReq(c <-chan *FlakeRequest) {
 
 	for req := range c {
 
-		now := time.Now().UnixMilli()
-		id := SnowFlakeID((now-n.custom_epoch)<<TimeShift |
-			(n.nodeId << NodeShift) | n.counter)
+		now := time.Since(n.custom_epoch).Milliseconds()
 
 		if now == n.timestamp {
-			n.counter = (n.counter + 1) / MaxCounter
+			n.counter = (n.counter + 1) & MaxCounter
 			if n.counter == 0 {
-				//TODO
-				fmt.Println("244 ns goal reached!")
+				for now <= n.timestamp {
+					now = time.Since(n.custom_epoch).Milliseconds()
+				}
 			}
 		} else {
-			n.timestamp = now
 			n.counter = 0
 		}
+		n.timestamp = now
 
-		req.id = id
+		req.id = SnowFlakeID(now<<TimeShift |
+			(n.nodeId << NodeShift) | n.counter)
+
 		close(req.done)
 	}
 }
@@ -131,20 +138,22 @@ func (n *FlakeNode) GenerateByLock() SnowFlakeID {
 
 	n.Lock()
 
-	now := time.Now().UnixMilli()
-	id := SnowFlakeID((now-n.custom_epoch)<<TimeShift |
-		(n.nodeId << NodeShift) | n.counter)
-
+	now := time.Since(n.custom_epoch).Milliseconds()
 	if now == n.timestamp {
 		n.counter = (n.counter + 1) & MaxCounter
 		if n.counter == 0 {
-			//TODO
-			fmt.Println("244 ns goal reached!")
+			for now <= n.timestamp {
+				now = time.Since(n.custom_epoch).Milliseconds()
+			}
 		}
 	} else {
-		n.timestamp = now
 		n.counter = 0
 	}
+	n.timestamp = now
+
+	id := SnowFlakeID((now << TimeShift) |
+		(n.nodeId << NodeShift) | n.counter)
+
 	n.Unlock()
 	return id
 }
